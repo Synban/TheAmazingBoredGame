@@ -161,6 +161,9 @@ export default function Home() {
 
   return (
     <main className="page">
+      <h1 className="title">
+        The Amazing <span className="title-bored">BORED</span> Game
+      </h1>
       <div className="push-area">
         {onCooldown && (
           <p className="cooldown-timer" aria-live="polite">
