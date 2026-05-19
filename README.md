@@ -29,7 +29,7 @@ Local dev uses in-memory storage (fine for a single machine / one server process
 
 ## How it works
 
-- **POST `/api/signal`** — records a new signal (timestamp) if not on cooldown; otherwise returns `429` with remaining cooldown ms.
-- **GET `/api/signal`** — returns the latest signal and cooldown remaining; the page polls in a loop and flashes when the signal changes.
+- **POST `/api/signal`** — bumps a monotonic `version` (Redis `INCR`) if not on cooldown; otherwise returns `429`.
+- **GET `/api/signal`** — returns `version`, `cooldownUntil` (absolute ms), and `cooldownRemainingMs`; the page polls and flashes only when `version` increases.
 - Cooldown state is shared via the same Redis key (or in-memory store locally). All clients disable the button and show the timer while cooldown is active.
 - The pusher also flashes immediately so they do not wait for the next poll.

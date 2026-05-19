@@ -1,9 +1,16 @@
 import { Redis } from "@upstash/redis";
 
-const SIGNAL_KEY = "bored-game:last-signal";
+const VERSION_KEY = "bored-game:version";
 const COOLDOWN_UNTIL_KEY = "bored-game:cooldown-until";
+/** Legacy key; only used to seed version once */
+const LEGACY_SIGNAL_KEY = "bored-game:last-signal";
 
 export const COOLDOWN_MS = 5 * 60 * 1000;
+
+export type GameState = {
+  version: number;
+  cooldownUntil: number;
+};
 
 /** Redis REST clients return numbers as strings; coerce before math. */
 export function toMs(value: unknown): number {
@@ -12,31 +19,22 @@ export function toMs(value: unknown): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-export function getCooldownRemainingMs(lastSignal: number, now = Date.now()): number {
-  const last = toMs(lastSignal);
-  if (last <= 0) return 0;
-  return Math.max(0, last + COOLDOWN_MS - now);
-}
-
 type GlobalSignal = typeof globalThis & {
-  __lastSignal?: number;
+  __version?: number;
   __cooldownUntil?: number;
 };
 
-function getMemorySignal(): number {
-  return toMs((globalThis as GlobalSignal).__lastSignal);
+function getMemoryState(): GameState {
+  return {
+    version: toMs((globalThis as GlobalSignal).__version),
+    cooldownUntil: toMs((globalThis as GlobalSignal).__cooldownUntil),
+  };
 }
 
-function setMemorySignal(value: number): void {
-  (globalThis as GlobalSignal).__lastSignal = value;
-}
-
-function getMemoryCooldownUntil(): number {
-  return toMs((globalThis as GlobalSignal).__cooldownUntil);
-}
-
-function setMemoryCooldownUntil(value: number): void {
-  (globalThis as GlobalSignal).__cooldownUntil = value;
+function setMemoryState(version: number, cooldownUntil: number): void {
+  const g = globalThis as GlobalSignal;
+  g.__version = version;
+  g.__cooldownUntil = cooldownUntil;
 }
 
 function getRedis(): Redis | null {
@@ -48,55 +46,85 @@ function getRedis(): Redis | null {
   return new Redis({ url, token });
 }
 
-export async function getLastSignal(): Promise<number> {
-  const redis = getRedis();
-  if (redis) {
-    const value = await redis.get(SIGNAL_KEY);
-    return toMs(value);
+async function ensureVersionMigrated(redis: Redis): Promise<void> {
+  const existing = await redis.get(VERSION_KEY);
+  if (toMs(existing) > 0) return;
+  const legacy = toMs(await redis.get(LEGACY_SIGNAL_KEY));
+  if (legacy > 0) {
+    await redis.set(VERSION_KEY, 1);
   }
-  return getMemorySignal();
 }
 
-export async function getCooldownRemainingMsFromStore(
-  now = Date.now(),
-): Promise<number> {
+export async function getGameState(now = Date.now()): Promise<GameState> {
   const redis = getRedis();
   if (redis) {
-    const until = toMs(await redis.get(COOLDOWN_UNTIL_KEY));
-    if (until > now) return until - now;
-    // Backfill from legacy signal-only records
-    const signal = toMs(await redis.get(SIGNAL_KEY));
-    return getCooldownRemainingMs(signal, now);
+    await ensureVersionMigrated(redis);
+    const [versionRaw, untilRaw] = await redis.mget<[unknown, unknown]>(
+      VERSION_KEY,
+      COOLDOWN_UNTIL_KEY,
+    );
+    const version = toMs(versionRaw);
+    let cooldownUntil = toMs(untilRaw);
+    if (cooldownUntil <= now && version > 0) {
+      const legacy = toMs(await redis.get(LEGACY_SIGNAL_KEY));
+      if (legacy > 0) {
+        cooldownUntil = legacy + COOLDOWN_MS;
+      }
+    }
+    return { version, cooldownUntil };
   }
-  const until = getMemoryCooldownUntil();
-  if (until > now) return until - now;
-  return getCooldownRemainingMs(getMemorySignal(), now);
+  return getMemoryState();
+}
+
+export function getCooldownRemainingMs(
+  cooldownUntil: number,
+  now = Date.now(),
+): number {
+  const until = toMs(cooldownUntil);
+  if (until <= now) return 0;
+  return until - now;
 }
 
 export type PushResult =
-  | { ok: true; signal: number }
-  | { ok: false; cooldownRemainingMs: number };
+  | { ok: true; version: number; cooldownUntil: number }
+  | { ok: false; cooldownRemainingMs: number; version: number; cooldownUntil: number };
 
 const PUSH_SCRIPT = `
-local signalKey = KEYS[1]
+local versionKey = KEYS[1]
 local untilKey = KEYS[2]
 local now = tonumber(ARGV[1])
 local cooldown = tonumber(ARGV[2])
 local until = tonumber(redis.call('GET', untilKey) or '0')
+local version = tonumber(redis.call('GET', versionKey) or '0')
 if until > now then
-  return {0, until - now}
+  return {0, until - now, version, until}
 end
+version = redis.call('INCR', versionKey)
 local nextUntil = now + cooldown
-redis.call('SET', signalKey, now)
 redis.call('SET', untilKey, nextUntil)
-return {1, now}
+return {1, 0, version, nextUntil}
 `;
 
-function parseEvalResult(raw: unknown): [number, number] {
-  if (!Array.isArray(raw) || raw.length < 2) {
+function parseEvalResult(
+  raw: unknown,
+): { ok: true; version: number; cooldownUntil: number } | { ok: false; cooldownRemainingMs: number; version: number; cooldownUntil: number } {
+  if (!Array.isArray(raw) || raw.length < 4) {
     throw new Error("Unexpected Redis eval response");
   }
-  return [toMs(raw[0]), toMs(raw[1])];
+  const ok = toMs(raw[0]);
+  if (ok === 0) {
+    return {
+      ok: false,
+      cooldownRemainingMs: toMs(raw[1]),
+      version: toMs(raw[2]),
+      cooldownUntil: toMs(raw[3]),
+    };
+  }
+  return {
+    ok: true,
+    version: toMs(raw[2]),
+    cooldownUntil: toMs(raw[3]),
+  };
 }
 
 export async function pushSignal(): Promise<PushResult> {
@@ -104,23 +132,39 @@ export async function pushSignal(): Promise<PushResult> {
   const redis = getRedis();
 
   if (redis) {
+    await ensureVersionMigrated(redis);
     const raw = await redis.eval(
       PUSH_SCRIPT,
-      [SIGNAL_KEY, COOLDOWN_UNTIL_KEY],
+      [VERSION_KEY, COOLDOWN_UNTIL_KEY],
       [String(now), String(COOLDOWN_MS)],
     );
-    const [ok, value] = parseEvalResult(raw);
-    if (ok === 0) {
-      return { ok: false, cooldownRemainingMs: value };
+    const parsed = parseEvalResult(raw);
+    if (!parsed.ok) {
+      return {
+        ok: false,
+        cooldownRemainingMs: parsed.cooldownRemainingMs,
+        version: parsed.version,
+        cooldownUntil: parsed.cooldownUntil,
+      };
     }
-    return { ok: true, signal: value };
+    return {
+      ok: true,
+      version: parsed.version,
+      cooldownUntil: parsed.cooldownUntil,
+    };
   }
 
-  const until = getMemoryCooldownUntil();
-  if (until > now) {
-    return { ok: false, cooldownRemainingMs: until - now };
+  const state = getMemoryState();
+  if (state.cooldownUntil > now) {
+    return {
+      ok: false,
+      cooldownRemainingMs: state.cooldownUntil - now,
+      version: state.version,
+      cooldownUntil: state.cooldownUntil,
+    };
   }
-  setMemorySignal(now);
-  setMemoryCooldownUntil(now + COOLDOWN_MS);
-  return { ok: true, signal: now };
+  const version = state.version + 1;
+  const cooldownUntil = now + COOLDOWN_MS;
+  setMemoryState(version, cooldownUntil);
+  return { ok: true, version, cooldownUntil };
 }
