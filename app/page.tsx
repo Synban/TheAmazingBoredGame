@@ -2,9 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const POLL_MS = 400;
+const POLL_MS = 300;
 const FLASH_MS = 600;
 const TICK_MS = 250;
+/** Ignore cooldownUntil moves smaller than this (clock skew / jitter). */
+const COOLDOWN_JUMP_MS = 2_000;
 
 type SignalResponse = {
   version: number;
@@ -34,6 +36,7 @@ export default function Home() {
   const [cooldownEndsAt, setCooldownEndsAt] = useState(0);
   const [cooldownMs, setCooldownMs] = useState(0);
   const lastSeenVersion = useRef(0);
+  const lastSeenCooldownUntil = useRef(0);
   const synced = useRef(false);
   const flashTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -57,25 +60,35 @@ export default function Home() {
     });
   }, []);
 
-  const noteVersion = useCallback(
-    (version: unknown, shouldFlash: boolean) => {
-      const v = toNum(version);
-      if (v <= 0) return;
+  const applyServerState = useCallback(
+    (body: SignalResponse, allowFlash: boolean) => {
+      const v = toNum(body.version);
+      const until = toPositiveMs(body.cooldownUntil);
+      const now = Date.now();
 
-      const prev = lastSeenVersion.current;
+      mergeCooldownUntil(until);
 
       if (!synced.current) {
         lastSeenVersion.current = v;
+        lastSeenCooldownUntil.current = until;
         synced.current = true;
         return;
       }
 
-      if (v > prev) {
-        lastSeenVersion.current = v;
-        if (shouldFlash) flash();
+      const versionBumped = v > lastSeenVersion.current;
+      const newCooldownWindow =
+        until > now && until > lastSeenCooldownUntil.current + COOLDOWN_JUMP_MS;
+
+      if (allowFlash && (versionBumped || newCooldownWindow)) {
+        flash();
+      }
+
+      if (v > lastSeenVersion.current) lastSeenVersion.current = v;
+      if (until > lastSeenCooldownUntil.current) {
+        lastSeenCooldownUntil.current = until;
       }
     },
-    [flash],
+    [flash, mergeCooldownUntil],
   );
 
   useEffect(() => {
@@ -97,12 +110,9 @@ export default function Home() {
           headers: { Pragma: "no-cache" },
         });
         if (!res.ok || cancelled) return;
-
         const body = (await res.json()) as SignalResponse;
         if (cancelled) return;
-
-        mergeCooldownUntil(body.cooldownUntil);
-        noteVersion(body.version, true);
+        applyServerState(body, true);
       } catch {
         /* retry on next tick */
       }
@@ -127,7 +137,7 @@ export default function Home() {
       document.removeEventListener("visibilitychange", onVisible);
       if (flashTimeout.current) clearTimeout(flashTimeout.current);
     };
-  }, [mergeCooldownUntil, noteVersion]);
+  }, [applyServerState]);
 
   async function onPush() {
     if (onCooldown) return;
@@ -138,16 +148,11 @@ export default function Home() {
         cache: "no-store",
       });
       const body = (await res.json()) as SignalResponse;
-      mergeCooldownUntil(body.cooldownUntil);
       if (res.ok) {
-        const v = toNum(body.version);
-        if (v > 0) {
-          lastSeenVersion.current = v;
-          synced.current = true;
-        }
+        applyServerState(body, false);
         flash();
       } else {
-        noteVersion(body.version, false);
+        applyServerState(body, false);
       }
     } finally {
       setSending(false);

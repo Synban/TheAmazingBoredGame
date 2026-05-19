@@ -18,7 +18,7 @@ export async function GET() {
   const { version, cooldownUntil } = await getGameState(now);
   const cooldownRemainingMs = getCooldownRemainingMs(cooldownUntil, now);
   return Response.json(
-    { version, cooldownUntil, cooldownRemainingMs },
+    { version, signal: version, cooldownUntil, cooldownRemainingMs },
     { headers: NO_CACHE },
   );
 }
@@ -29,6 +29,7 @@ export async function POST() {
     return Response.json(
       {
         version: result.version,
+        signal: result.version,
         cooldownUntil: result.cooldownUntil,
         cooldownRemainingMs: result.cooldownRemainingMs,
       },
@@ -38,6 +39,7 @@ export async function POST() {
   return Response.json(
     {
       version: result.version,
+      signal: result.version,
       cooldownUntil: result.cooldownUntil,
       cooldownRemainingMs: COOLDOWN_MS,
     },
