@@ -111,7 +111,7 @@ function parseEvalResult(
   if (!Array.isArray(raw) || raw.length < 4) {
     throw new Error("Unexpected Redis eval response");
   }
-  const ok = toMs(raw[0]);
+  const ok = Number(raw[0]);
   if (ok === 0) {
     return {
       ok: false,

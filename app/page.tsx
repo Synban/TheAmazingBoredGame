@@ -5,7 +5,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 const POLL_MS = 400;
 const FLASH_MS = 600;
 const TICK_MS = 250;
-const STORAGE_VERSION_KEY = "bored-game:last-version";
 
 type SignalResponse = {
   version: number;
@@ -13,9 +12,14 @@ type SignalResponse = {
   cooldownRemainingMs?: number;
 };
 
-function toMs(value: unknown): number {
+function toNum(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  return Number.isFinite(n) ? n : 0;
+}
+
+function toPositiveMs(value: unknown): number {
+  const n = toNum(value);
+  return n > 0 ? n : 0;
 }
 
 function formatCooldown(ms: number): string {
@@ -25,29 +29,13 @@ function formatCooldown(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-function readStoredVersion(): number {
-  try {
-    return toMs(sessionStorage.getItem(STORAGE_VERSION_KEY));
-  } catch {
-    return 0;
-  }
-}
-
-function writeStoredVersion(version: number): void {
-  try {
-    sessionStorage.setItem(STORAGE_VERSION_KEY, String(version));
-  } catch {
-    /* private mode / blocked */
-  }
-}
-
 export default function Home() {
   const [sending, setSending] = useState(false);
   const [cooldownEndsAt, setCooldownEndsAt] = useState(0);
   const [cooldownMs, setCooldownMs] = useState(0);
   const lastSeenVersion = useRef(0);
+  const synced = useRef(false);
   const flashTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pollSeq = useRef(0);
 
   const onCooldown = cooldownMs > 0;
 
@@ -60,7 +48,7 @@ export default function Home() {
   }, []);
 
   const mergeCooldownUntil = useCallback((serverUntil: unknown) => {
-    const until = toMs(serverUntil);
+    const until = toPositiveMs(serverUntil);
     const now = Date.now();
     setCooldownEndsAt((prev) => {
       if (until > now) return Math.max(prev, until);
@@ -69,30 +57,26 @@ export default function Home() {
     });
   }, []);
 
-  const applyVersion = useCallback(
+  const noteVersion = useCallback(
     (version: unknown, shouldFlash: boolean) => {
-      const v = toMs(version);
+      const v = toNum(version);
       if (v <= 0) return;
 
       const prev = lastSeenVersion.current;
-      if (prev === 0) {
+
+      if (!synced.current) {
         lastSeenVersion.current = v;
-        writeStoredVersion(v);
+        synced.current = true;
         return;
       }
 
       if (v > prev) {
         lastSeenVersion.current = v;
-        writeStoredVersion(v);
         if (shouldFlash) flash();
       }
     },
     [flash],
   );
-
-  useEffect(() => {
-    lastSeenVersion.current = readStoredVersion();
-  }, []);
 
   useEffect(() => {
     const tick = () => {
@@ -107,19 +91,18 @@ export default function Home() {
     let cancelled = false;
 
     async function pollOnce() {
-      const seq = ++pollSeq.current;
       try {
         const res = await fetch(`/api/signal?t=${Date.now()}`, {
           cache: "no-store",
           headers: { Pragma: "no-cache" },
         });
-        if (!res.ok || cancelled || seq !== pollSeq.current) return;
+        if (!res.ok || cancelled) return;
 
         const body = (await res.json()) as SignalResponse;
-        if (cancelled || seq !== pollSeq.current) return;
+        if (cancelled) return;
 
         mergeCooldownUntil(body.cooldownUntil);
-        applyVersion(body.version, true);
+        noteVersion(body.version, true);
       } catch {
         /* retry on next tick */
       }
@@ -144,7 +127,7 @@ export default function Home() {
       document.removeEventListener("visibilitychange", onVisible);
       if (flashTimeout.current) clearTimeout(flashTimeout.current);
     };
-  }, [applyVersion, mergeCooldownUntil]);
+  }, [mergeCooldownUntil, noteVersion]);
 
   async function onPush() {
     if (onCooldown) return;
@@ -156,7 +139,16 @@ export default function Home() {
       });
       const body = (await res.json()) as SignalResponse;
       mergeCooldownUntil(body.cooldownUntil);
-      applyVersion(body.version, res.ok);
+      if (res.ok) {
+        const v = toNum(body.version);
+        if (v > 0) {
+          lastSeenVersion.current = v;
+          synced.current = true;
+        }
+        flash();
+      } else {
+        noteVersion(body.version, false);
+      }
     } finally {
       setSending(false);
     }
