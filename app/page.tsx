@@ -12,6 +12,7 @@ type SignalResponse = {
   version: number;
   cooldownUntil: number;
   cooldownRemainingMs?: number;
+  currentWord?: string;
 };
 
 function toNum(value: unknown): number {
@@ -35,6 +36,7 @@ export default function Home() {
   const [sending, setSending] = useState(false);
   const [cooldownEndsAt, setCooldownEndsAt] = useState(0);
   const [cooldownMs, setCooldownMs] = useState(0);
+  const [currentWord, setCurrentWord] = useState("");
   const lastSeenVersion = useRef(0);
   const lastSeenCooldownUntil = useRef(0);
   const synced = useRef(false);
@@ -67,6 +69,10 @@ export default function Home() {
       const now = Date.now();
 
       mergeCooldownUntil(until);
+
+      if (typeof body.currentWord === "string" && body.currentWord) {
+        setCurrentWord(body.currentWord);
+      }
 
       if (!synced.current) {
         lastSeenVersion.current = v;
@@ -159,12 +165,17 @@ export default function Home() {
     }
   }
 
+  const wordLabel = currentWord || "—";
+
   return (
     <main className="page">
       <h1 className="title">
         The Amazing <span className="title-bored">BORED</span> Game
       </h1>
       <div className="push-area">
+        <p className="current-word">
+          Current Word: <span className="current-word-value">{wordLabel}</span>
+        </p>
         {onCooldown && (
           <p className="cooldown-timer" aria-live="polite">
             {formatCooldown(cooldownMs)}
@@ -175,7 +186,7 @@ export default function Home() {
           onClick={onPush}
           disabled={sending || onCooldown}
         >
-          Push
+          I&apos;m Bored
         </button>
       </div>
     </main>

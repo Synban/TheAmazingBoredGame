@@ -49,6 +49,18 @@ body.flash {
   gap: 0.75rem;
 }
 
+.current-word {
+  font-size: 1.125rem;
+  text-align: center;
+  padding: 0 1rem;
+}
+
+.current-word-value {
+  color: #c00;
+  font-weight: 600;
+  text-transform: lowercase;
+}
+
 .cooldown-timer {
   color: #c00;
   font-size: 1.5rem;

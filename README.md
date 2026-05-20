@@ -1,6 +1,6 @@
 # The Amazing Bored Game
 
-One button. When anyone pushes it, every open tab flashes red, then back to black. After a push, the button is on a **global 5-minute cooldown** for everyone — a red countdown (`M:SS`) appears above the button until it expires.
+One button. When anyone pushes **I'm Bored**, every open tab flashes red, then back to black. A random search word is picked for everyone, shown as **Current Word**, and the button is on a **global 5:30 cooldown** — a red countdown (`M:SS`) appears between the word and the button until it expires.
 
 ## Run locally
 
@@ -9,7 +9,7 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in two browser windows. Click **Push** in one — both should flash.
+Open [http://localhost:3000](http://localhost:3000) in two browser windows. Click **I'm Bored** in one — both should flash and show the same word.
 
 Local dev uses in-memory storage (fine for a single machine / one server process).
 

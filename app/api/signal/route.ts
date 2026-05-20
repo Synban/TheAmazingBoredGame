@@ -15,10 +15,16 @@ const NO_CACHE = {
 
 export async function GET() {
   const now = Date.now();
-  const { version, cooldownUntil } = await getGameState(now);
+  const { version, cooldownUntil, currentWord } = await getGameState(now);
   const cooldownRemainingMs = getCooldownRemainingMs(cooldownUntil, now);
   return Response.json(
-    { version, signal: version, cooldownUntil, cooldownRemainingMs },
+    {
+      version,
+      signal: version,
+      cooldownUntil,
+      cooldownRemainingMs,
+      currentWord,
+    },
     { headers: NO_CACHE },
   );
 }
@@ -32,6 +38,7 @@ export async function POST() {
         signal: result.version,
         cooldownUntil: result.cooldownUntil,
         cooldownRemainingMs: result.cooldownRemainingMs,
+        currentWord: result.currentWord,
       },
       { status: 429, headers: NO_CACHE },
     );
@@ -42,6 +49,7 @@ export async function POST() {
       signal: result.version,
       cooldownUntil: result.cooldownUntil,
       cooldownRemainingMs: COOLDOWN_MS,
+      currentWord: result.currentWord,
     },
     { headers: NO_CACHE },
   );
