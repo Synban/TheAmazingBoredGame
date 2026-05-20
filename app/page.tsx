@@ -1,6 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  countWords,
+  isBoredReasonValid,
+  MAX_REASON_CHARS,
+  MIN_REASON_CHARS,
+  MIN_REASON_WORDS,
+  normalizeReason,
+} from "@/lib/bored-reason";
 
 const POLL_MS = 300;
 const FLASH_MS = 600;
@@ -13,6 +21,8 @@ type SignalResponse = {
   cooldownUntil: number;
   cooldownRemainingMs?: number;
   currentWord?: string;
+  currentReason?: string;
+  message?: string;
 };
 
 function toNum(value: unknown): number {
@@ -37,12 +47,20 @@ export default function Home() {
   const [cooldownEndsAt, setCooldownEndsAt] = useState(0);
   const [cooldownMs, setCooldownMs] = useState(0);
   const [currentWord, setCurrentWord] = useState("");
+  const [displayReason, setDisplayReason] = useState("");
+  const [reasonDraft, setReasonDraft] = useState("");
+  const [validationMessage, setValidationMessage] = useState("");
   const lastSeenVersion = useRef(0);
   const lastSeenCooldownUntil = useRef(0);
   const synced = useRef(false);
   const flashTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const onCooldown = cooldownMs > 0;
+  const draftNormalized = normalizeReason(reasonDraft);
+  const draftWords = countWords(reasonDraft);
+  const draftChars = draftNormalized.length;
+  const reasonValid = isBoredReasonValid(reasonDraft);
+  const canPush = reasonValid && !onCooldown && !sending;
 
   const flash = useCallback(() => {
     document.body.classList.add("flash");
@@ -72,6 +90,10 @@ export default function Home() {
 
       if (typeof body.currentWord === "string" && body.currentWord) {
         setCurrentWord(body.currentWord);
+      }
+
+      if (typeof body.currentReason === "string") {
+        setDisplayReason(body.currentReason);
       }
 
       if (!synced.current) {
@@ -146,19 +168,24 @@ export default function Home() {
   }, [applyServerState]);
 
   async function onPush() {
-    if (onCooldown) return;
+    if (!canPush) return;
     setSending(true);
+    setValidationMessage("");
     try {
       const res = await fetch("/api/signal", {
         method: "POST",
         cache: "no-store",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason: reasonDraft }),
       });
       const body = (await res.json()) as SignalResponse;
+      applyServerState(body, false);
+
       if (res.ok) {
-        applyServerState(body, false);
         flash();
-      } else {
-        applyServerState(body, false);
+        setReasonDraft("");
+      } else if (res.status === 400 && body.message) {
+        setValidationMessage(body.message);
       }
     } finally {
       setSending(false);
@@ -166,6 +193,7 @@ export default function Home() {
   }
 
   const wordLabel = currentWord || "—";
+  const reasonLabel = displayReason || "—";
 
   return (
     <main className="page">
@@ -173,18 +201,56 @@ export default function Home() {
         The Amazing <span className="title-bored">BORED</span> Game
       </h1>
       <div className="push-area">
+        <section className="reason-display" aria-live="polite">
+          <h2 className="reason-display-label">Reason they&apos;re bored</h2>
+          <p className="reason-display-text">{reasonLabel}</p>
+        </section>
+
         <p className="current-word">
           Current Word: <span className="current-word-value">{wordLabel}</span>
         </p>
+
+        <div className="reason-input-wrap">
+          <label className="reason-input-label" htmlFor="bored-reason">
+            Reason you&apos;re bored
+          </label>
+          <textarea
+            id="bored-reason"
+            className="reason-input"
+            value={reasonDraft}
+            onChange={(e) => {
+              setReasonDraft(e.target.value);
+              setValidationMessage("");
+            }}
+            disabled={sending || onCooldown}
+            maxLength={MAX_REASON_CHARS}
+            rows={4}
+            placeholder="Tell everyone why you're bored…"
+          />
+          <p
+            className={`reason-hint${reasonValid ? " reason-hint-valid" : ""}`}
+          >
+            {draftWords}/{MIN_REASON_WORDS} words · {draftChars}/{MIN_REASON_CHARS}{" "}
+            characters
+          </p>
+          {validationMessage && (
+            <p className="reason-error" role="alert">
+              {validationMessage}
+            </p>
+          )}
+        </div>
+
         {onCooldown && (
           <p className="cooldown-timer" aria-live="polite">
             {formatCooldown(cooldownMs)}
           </p>
         )}
+
         <button
           type="button"
           onClick={onPush}
-          disabled={sending || onCooldown}
+          disabled={!canPush}
+          aria-busy={sending || undefined}
         >
           I&apos;m Bored
         </button>

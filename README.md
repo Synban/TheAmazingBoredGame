@@ -1,6 +1,6 @@
 # The Amazing Bored Game
 
-One button. When anyone pushes **I'm Bored**, every open tab flashes red, then back to black. A random search word is picked for everyone, shown as **Current Word**, and the button is on a **global 5:30 cooldown** — a red countdown (`M:SS`) appears between the word and the button until it expires.
+One button. Before pushing **I'm Bored**, you must write a **Reason you're bored** (at least 10 words and 50 characters). When anyone pushes, every open tab flashes red, then back to black. Their reason is shown globally as **Reason they're bored**, a random search word appears as **Current Word**, and the button is on a **global 5:30 cooldown** — a red countdown (`M:SS`) appears above the button until it expires.
 
 ## Run locally
 

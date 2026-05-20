@@ -1,9 +1,11 @@
 import { Redis } from "@upstash/redis";
+import { validateBoredReason } from "@/lib/bored-reason";
 import { pickRandomWord } from "@/lib/random-word";
 
 const VERSION_KEY = "bored-game:version";
 const COOLDOWN_UNTIL_KEY = "bored-game:cooldown-until";
 const CURRENT_WORD_KEY = "bored-game:current-word";
+const CURRENT_REASON_KEY = "bored-game:current-reason";
 
 /** 5 minutes 30 seconds */
 export const COOLDOWN_MS = 5 * 60 * 1000 + 30 * 1000;
@@ -12,6 +14,7 @@ export type GameState = {
   version: number;
   cooldownUntil: number;
   currentWord: string;
+  currentReason: string;
 };
 
 /** Coerce Redis values (often strings) to a non-negative integer. */
@@ -21,10 +24,15 @@ export function toNum(value: unknown): number {
   return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 0;
 }
 
+function toReason(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
 type GlobalSignal = typeof globalThis & {
   __version?: number;
   __cooldownUntil?: number;
   __currentWord?: string;
+  __currentReason?: string;
 };
 
 function getMemoryState(): GameState {
@@ -33,6 +41,7 @@ function getMemoryState(): GameState {
     version: toNum(g.__version),
     cooldownUntil: toNum(g.__cooldownUntil),
     currentWord: typeof g.__currentWord === "string" ? g.__currentWord : "",
+    currentReason: typeof g.__currentReason === "string" ? g.__currentReason : "",
   };
 }
 
@@ -40,11 +49,13 @@ function setMemoryState(
   version: number,
   cooldownUntil: number,
   currentWord: string,
+  currentReason: string,
 ): void {
   const g = globalThis as GlobalSignal;
   g.__version = version;
   g.__cooldownUntil = cooldownUntil;
   g.__currentWord = currentWord;
+  g.__currentReason = currentReason;
 }
 
 function getRedis(): Redis | null {
@@ -66,8 +77,13 @@ export async function getGameState(now = Date.now()): Promise<GameState> {
     const version = toNum(await redis.get(VERSION_KEY));
     const cooldownUntil = toNum(await redis.get(COOLDOWN_UNTIL_KEY));
     const rawWord = await redis.get(CURRENT_WORD_KEY);
-    const currentWord = typeof rawWord === "string" ? rawWord : "";
-    return { version, cooldownUntil, currentWord };
+    const rawReason = await redis.get(CURRENT_REASON_KEY);
+    return {
+      version,
+      cooldownUntil,
+      currentWord: toReason(rawWord),
+      currentReason: toReason(rawReason),
+    };
   }
   return getMemoryState();
 }
@@ -81,33 +97,89 @@ export function getCooldownRemainingMs(
   return until - now;
 }
 
-export type PushResult =
-  | { ok: true; version: number; cooldownUntil: number; currentWord: string }
-  | {
-      ok: false;
-      cooldownRemainingMs: number;
-      version: number;
-      cooldownUntil: number;
-      currentWord: string;
-    };
+type PushSuccess = {
+  ok: true;
+  version: number;
+  cooldownUntil: number;
+  currentWord: string;
+  currentReason: string;
+};
 
-export async function pushSignal(): Promise<PushResult> {
+type PushCooldown = {
+  ok: false;
+  error: "cooldown";
+  cooldownRemainingMs: number;
+  version: number;
+  cooldownUntil: number;
+  currentWord: string;
+  currentReason: string;
+};
+
+type PushInvalidReason = {
+  ok: false;
+  error: "invalid_reason";
+  message: string;
+  version: number;
+  cooldownUntil: number;
+  currentWord: string;
+  currentReason: string;
+};
+
+export type PushResult = PushSuccess | PushCooldown | PushInvalidReason;
+
+export async function pushSignal(reasonInput: string): Promise<PushResult> {
+  const validation = validateBoredReason(reasonInput);
   const now = Date.now();
   const redis = getRedis();
+
+  async function loadExisting(): Promise<GameState> {
+    if (redis) {
+      const version = toNum(await redis.get(VERSION_KEY));
+      const cooldownUntil = toNum(await redis.get(COOLDOWN_UNTIL_KEY));
+      const rawWord = await redis.get(CURRENT_WORD_KEY);
+      const rawReason = await redis.get(CURRENT_REASON_KEY);
+      return {
+        version,
+        cooldownUntil,
+        currentWord: toReason(rawWord),
+        currentReason: toReason(rawReason),
+      };
+    }
+    return getMemoryState();
+  }
+
+  if (!validation.ok) {
+    const state = await loadExisting();
+    return {
+      ok: false,
+      error: "invalid_reason",
+      message: validation.message,
+      version: state.version,
+      cooldownUntil: state.cooldownUntil,
+      currentWord: state.currentWord,
+      currentReason: state.currentReason,
+    };
+  }
+
+  const currentReason = validation.reason;
 
   if (redis) {
     const currentUntil = toNum(await redis.get(COOLDOWN_UNTIL_KEY));
     const currentVersion = toNum(await redis.get(VERSION_KEY));
     const rawWord = await redis.get(CURRENT_WORD_KEY);
-    const existingWord = typeof rawWord === "string" ? rawWord : "";
+    const rawReason = await redis.get(CURRENT_REASON_KEY);
+    const existingWord = toReason(rawWord);
+    const existingReason = toReason(rawReason);
 
     if (currentUntil > now) {
       return {
         ok: false,
+        error: "cooldown",
         cooldownRemainingMs: currentUntil - now,
         version: currentVersion,
         cooldownUntil: currentUntil,
         currentWord: existingWord,
+        currentReason: existingReason,
       };
     }
 
@@ -116,11 +188,13 @@ export async function pushSignal(): Promise<PushResult> {
     const currentWord = pickRandomWord();
     await redis.set(COOLDOWN_UNTIL_KEY, cooldownUntil);
     await redis.set(CURRENT_WORD_KEY, currentWord);
+    await redis.set(CURRENT_REASON_KEY, currentReason);
     return {
       ok: true,
       version: toNum(version),
       cooldownUntil,
       currentWord,
+      currentReason,
     };
   }
 
@@ -128,15 +202,17 @@ export async function pushSignal(): Promise<PushResult> {
   if (state.cooldownUntil > now) {
     return {
       ok: false,
+      error: "cooldown",
       cooldownRemainingMs: state.cooldownUntil - now,
       version: state.version,
       cooldownUntil: state.cooldownUntil,
       currentWord: state.currentWord,
+      currentReason: state.currentReason,
     };
   }
   const version = state.version + 1;
   const cooldownUntil = now + COOLDOWN_MS;
   const currentWord = pickRandomWord();
-  setMemoryState(version, cooldownUntil, currentWord);
-  return { ok: true, version, cooldownUntil, currentWord };
+  setMemoryState(version, cooldownUntil, currentWord, currentReason);
+  return { ok: true, version, cooldownUntil, currentWord, currentReason };
 }
